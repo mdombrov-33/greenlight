@@ -2,6 +2,7 @@ package data
 
 import (
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/lib/pq"
@@ -40,7 +41,6 @@ type MovieModel struct {
 	DB *sql.DB
 }
 
-// Add a placeholder method for inserting a new record in the movies table.
 func (m MovieModel) Insert(movie *Movie) error {
 	query := `
 	INSERT INTO movies(title, year, runtime, genres)
@@ -59,9 +59,57 @@ func (m MovieModel) Insert(movie *Movie) error {
 	return m.DB.QueryRow(query, args...).Scan(&movie.ID, &movie.CreatedAt, &movie.Version)
 }
 
-// Add a placeholder method for fetching a specific record from the movies table.
+// Reasons why we use int64 and not uint64 in Get() method:
+// 1. Postgres doesn't support unsigned integers.
+// Use mapping:
+// smallint, smallserial -> int16; integer, serial -> int32; bigint, bigserial -> int64.
+// 2. Go’s database/sql package doesn’t actually support any integer values greater than 9223372036854775807 (the maximum value for an int64).
+// It’s possible that a uint64 value could be greater than this, which would in turn lead to Go generating a runtime error similar to this:
+// sql: converting argument $1 type: uint64 values with high bit set are not supported.
 func (m MovieModel) Get(id int64) (*Movie, error) {
-	return nil, nil
+	// The PostgreSQL bigserial type that we're using for the movie ID starts
+	// auto-incrementing at 1 by default, so we know that no movies will have ID values
+	// less than that. To avoid making an unnecessary database call, we take a shortcut
+	// and return an ErrRecordNotFound error straight away.
+	if id < 1 {
+		return nil, ErrRecordNotFound
+	}
+
+	query := `
+	SELECT id, created_at, title, year, runtime, genres, version
+	FROM MOVIES
+	WHERE id = $1
+	`
+
+	var movie Movie
+
+	// Execute the query using the QueryRow() method, passing in the provided id value
+	// as a placeholder parameter, and scan the response data into the fields of the
+	// Movie struct. Importantly, notice that we need to convert the scan target for the
+	// genres column using the pq.Array() adapter function again.
+	err := m.DB.QueryRow(query, id).Scan(
+		&movie.ID,
+		&movie.CreatedAt,
+		&movie.Title,
+		&movie.Year,
+		&movie.Runtime,
+		pq.Array(&movie.Genres),
+		&movie.Version,
+	)
+
+	// Handle any errors. If there was no matching movie found, Scan() will return
+	// a sql.ErrNoRows error. We check for this and return our custom ErrRecordNotFound
+	// error instead.
+	if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return nil, ErrRecordNotFound
+		default:
+			return nil, err
+		}
+	}
+	// Otherwise, return a pointer to the Movie struct.
+	return &movie, nil
 }
 
 // Add a placeholder method for updating a specific record in the movies table.
