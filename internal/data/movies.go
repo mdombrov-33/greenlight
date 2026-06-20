@@ -113,10 +113,11 @@ func (m MovieModel) Get(id int64) (*Movie, error) {
 }
 
 func (m MovieModel) Update(movie *Movie) error {
+	// version = $6 is used to prevent data race when 2 clients try to update at the same time.
 	query := `
 	UPDATE movies
 	SET title = $1, year = $2, runtime = $3, genres = $4, version = version + 1
-	WHERE id = $5
+	WHERE id = $5 and version = $6 
 	RETURNING version
 	`
 
@@ -126,11 +127,22 @@ func (m MovieModel) Update(movie *Movie) error {
 		movie.Runtime,
 		pq.Array(movie.Genres),
 		movie.ID,
+		movie.Version,
 	}
 
-	// Use the QueryRow() method to execute the query, passing in the args slice as a
-	// variadic parameter and scanning the new version value into the movie struct.
-	return m.DB.QueryRow(query, args...).Scan(&movie.Version)
+	// Execute the SQL query. If no matching row could be found, we know the movie
+	// version has changed (or the record has been deleted) and we return our custom
+	// ErrEditConflict error.
+	err := m.DB.QueryRow(query, args...).Scan(&movie.Version)
+	if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return ErrEditConflict
+		default:
+			return err
+		}
+	}
+	return nil
 
 }
 
