@@ -60,7 +60,7 @@ func (app *application) readJSON(w http.ResponseWriter, r *http.Request, dst any
 	dec.DisallowUnknownFields()
 
 	// Decode the request body into the target destination.
-	// Can also use Unmarshal for decoding but in general Decoder is better.
+	// Can also use Unmarshal for decoding but in general Decoder is better(more efficient)
 	err := dec.Decode(dst)
 
 	if err != nil {
