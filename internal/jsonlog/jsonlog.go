@@ -9,6 +9,9 @@ import (
 	"time"
 )
 
+// TLDR: custom logger in JSON format.
+// If we don't want custom, we can use third-party packages, for example - zerolog.
+
 // Define a level type to represent the severity level for a log entry.
 type Level int8
 
