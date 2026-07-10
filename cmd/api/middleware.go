@@ -2,7 +2,12 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/http"
+	"sync"
+	"time"
+
+	"golang.org/x/time/rate"
 )
 
 func (app *application) recoverPanic(next http.Handler) http.Handler {
@@ -26,6 +31,86 @@ func (app *application) recoverPanic(next http.Handler) http.Handler {
 				app.serverErrorResponse(w, r, fmt.Errorf("%s", err))
 			}
 		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Using this pattern for rate-limiting will only work if your API application is running on a
+// single-machine. If your infrastructure is distributed, with your application running on
+// multiple servers behind a load balancer, then you’ll need to use an alternative approach.
+// If you’re using HAProxy or Nginx as a load balancer or reverse proxy, both of these have
+// built-in functionality for rate limiting that it would probably be sensible to use.
+// Alternatively, you could use a fast database like Redis to maintain a request count for
+// clients, running on a server which all your application servers can communicate with.
+func (app *application) rateLimit(next http.Handler) http.Handler {
+	// Define a client struct to hold the rate limiter and last seen time for each
+	// client.
+	type client struct {
+		limiter  *rate.Limiter
+		lastSeen time.Time
+	}
+
+	var (
+		mu sync.Mutex
+		// Update the map so the values are pointers to a client struct.
+		clients = make(map[string]*client)
+	)
+
+	// Launch a background goroutine which removes old entries from the clients map once
+	// every minute.
+	go func() {
+		for {
+			time.Sleep(time.Minute)
+
+			// Lock the mutex to prevent any rate limiter checks from happening while
+			// the cleanup is taking place.
+			mu.Lock()
+
+			// Loop through all clients. If they haven't been seen within the last three
+			// minutes, delete the corresponding entry from the map.
+			for ip, client := range clients {
+				if time.Since(client.lastSeen) > 3*time.Minute {
+					delete(clients, ip)
+				}
+			}
+
+			// Importantly, unlock the mutex when the cleanup is complete.
+			mu.Unlock()
+		}
+	}()
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only carry out the check if rate limiting is enabled.
+		if app.config.limiter.enabled {
+			ip, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				app.serverErrorResponse(w, r, err)
+				return
+			}
+
+			mu.Lock()
+
+			// Create and add a new client struct to the map if it doesn't already exist.
+			if _, found := clients[ip]; !found {
+				clients[ip] = &client{
+					// Use the requests-per-second and burst values from the config
+					// struct.
+					limiter: rate.NewLimiter(rate.Limit(app.config.limiter.rps), app.config.limiter.burst),
+				}
+			}
+
+			// Update the last seen time for the client.
+			clients[ip].lastSeen = time.Now()
+
+			if !clients[ip].limiter.Allow() {
+				mu.Unlock()
+				app.rateLimitExceededResponse(w, r)
+				return
+			}
+
+			mu.Unlock()
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }
